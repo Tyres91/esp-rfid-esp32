@@ -24,13 +24,18 @@ SOFTWARE.
  */
 #define VERSION "2.0.0"
 
-#include "Arduino.h"
+#if defined(ESP32)
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#else
 #include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+#endif
+#include "Arduino.h"
 #include <SPI.h>
 #include <ESP8266mDNS.h>
 #include <ArduinoJson.h>
 #include <FS.h>
-#include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <TimeLib.h>
 #include <Ticker.h>
@@ -121,6 +126,19 @@ unsigned long wiFiUptimeMillis = 0;
 #include "webserver.esp"
 #include "door.esp"
 #include "doorbell.esp"
+
+#if defined(ESP32)
+  #include "SPIFFS.esp"
+  #define FS SPIFFS
+#else
+  #include "FS.h"
+  #include "SPIFFS.esp"
+  #define FS SPIFFS
+#endif
+
+void fsMount() {
+  if (!FS.begin(true)) { Serial.println("FS mount failed"); }
+}
 
 void ICACHE_FLASH_ATTR setup()
 {
