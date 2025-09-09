@@ -411,7 +411,7 @@ void getUserList()
 {
 	DynamicJsonDocument root(512);
 	JsonArray users = root.createNestedArray("list");
-	Dir dir = SPIFFS.openDir("/P/");
+	File p = SPIFFS.open("/P/");
 #ifdef DEBUG
 	Serial.println("[ INFO ] getUserList");
 #endif

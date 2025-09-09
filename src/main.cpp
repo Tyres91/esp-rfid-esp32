@@ -25,17 +25,18 @@ SOFTWARE.
 #define VERSION "2.0.0"
 
 #if defined(ESP32)
-#include <WiFi.h>
-#include <AsyncTCP.h>
+  #include <WiFi.h>
+  #include <AsyncTCP.h>
 #else
-#include <ESP8266WiFi.h>
-#include <ESPAsyncTCP.h>
+  #include <ESP8266WiFi.h>
+  #include <ESPAsyncTCP.h>
 #endif
 #include "Arduino.h"
 #include <SPI.h>
-#include <ESP8266mDNS.h>
+#include <ESPmDNS.h>
 #include <ArduinoJson.h>
-#include <FS.h>
+#include "SPIFFS.h"
+using fs::File;  // ESP32 deklariert File in fs::
 #include <ESPAsyncWebServer.h>
 #include <TimeLib.h>
 #include <Ticker.h>
@@ -44,6 +45,7 @@ SOFTWARE.
 #include <Bounce2.h>
 #include "magicnumbers.h"
 #include "config.h"
+#include <Update.h>
 
 Config config;
 
@@ -77,7 +79,6 @@ AsyncMqttClient mqttClient;
 Ticker mqttReconnectTimer;
 Ticker wifiReconnectTimer;
 Ticker wsMessageTicker;
-WiFiEventHandler wifiDisconnectHandler, wifiConnectHandler, wifiOnStationModeGotIPHandler;
 Bounce openLockButton;
 
 AsyncWebServer server(80);
@@ -127,18 +128,38 @@ unsigned long wiFiUptimeMillis = 0;
 #include "door.esp"
 #include "doorbell.esp"
 
-#if defined(ESP32)
-  #include "SPIFFS.esp"
-  #define FS SPIFFS
-#else
-  #include "FS.h"
-  #include "SPIFFS.esp"
-  #define FS SPIFFS
-#endif
-
 void fsMount() {
   if (!FS.begin(true)) { Serial.println("FS mount failed"); }
 }
+
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.println("[WiFi] STA connected");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.print("[WiFi] Got IP: ");
+      Serial.println(WiFi.localIP());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf("[WiFi] Disconnected (reason=%d). Reconnecting...\n", info.wifi_sta_disconnected.reason);
+      WiFi.reconnect();
+      break;
+    case ARDUINO_EVENT_WIFI_AP_START:
+      Serial.println("[WiFi] AP started");
+      break;
+    default: break;
+  }
+}
+
+// Chip-ID Ersatz (ESP8266 -> ESP32)
+static uint32_t chipId32() {
+  uint64_t mac = ESP.getEfuseMac();
+  return (uint32_t)(mac >> 24);
+}
+
+static String ipToString(const IPAddress &ip) { return ip.toString(); }
+
 
 void ICACHE_FLASH_ATTR setup()
 {
@@ -169,6 +190,8 @@ void ICACHE_FLASH_ATTR setup()
 		Serial.println("Flash Chip configuration ok.\n");
 	}
 #endif
+
+WiFi.onEvent(onWiFiEvent);
 
 	if (!SPIFFS.begin())
 	{

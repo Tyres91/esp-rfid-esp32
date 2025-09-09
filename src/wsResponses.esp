@@ -60,7 +60,7 @@ void ICACHE_FLASH_ATTR sendUserList(int page, AsyncWebSocketClient *client)
 		serializeJson(root, (char *)buffer->get(), len + 1);
 		if (client)
 		{
-			wsMessageTicker.once_ms_scheduled(50, [client, buffer]() {
+			wsMessageTicker.once_ms(50, [client, buffer]() {
 				client->text(buffer);
 				client->text("{\"command\":\"result\",\"resultof\":\"userlist\",\"result\": true}");
 			});
@@ -74,10 +74,10 @@ void ICACHE_FLASH_ATTR sendUserList(int page, AsyncWebSocketClient *client)
 
 void ICACHE_FLASH_ATTR sendStatus(AsyncWebSocketClient *client)
 {
-	struct ip_info info;
-	FSInfo fsinfo;
-	if (!SPIFFS.info(fsinfo))
-	{
+	size_t total = SPIFFS.totalBytes();
+	size_t used  = SPIFFS.usedBytes();
+	root["availspiffs"] = total - used;
+
 #ifdef DEBUG
 		Serial.print(F("[ WARN ] Error getting info on SPIFFS"));
 #endif
@@ -85,7 +85,8 @@ void ICACHE_FLASH_ATTR sendStatus(AsyncWebSocketClient *client)
 	DynamicJsonDocument root(512);
 	root["command"] = "status";
 	root["heap"] = ESP.getFreeHeap();
-	root["chipid"] = String(ESP.getChipId(), HEX);
+	root["chipid"] = String(chipId32(), HEX);
+
 	root["cpu"] = ESP.getCpuFreqMHz();
 	root["sketchsize"] = ESP.getSketchSize();
 	root["availsize"] = ESP.getFreeSketchSpace();
@@ -101,7 +102,8 @@ void ICACHE_FLASH_ATTR sendStatus(AsyncWebSocketClient *client)
 	root["uptime"] = uptimebuffer;
 
 	root["version"] = VERSION;
-	root["hostname"] = WiFi.hostname();
+	const char* hn = WiFi.getHostname();
+	root["hostname"] = hn ? hn : "";
 
 	if (config.accessPointMode)
 	{
@@ -177,7 +179,6 @@ void ICACHE_FLASH_ATTR printScanResult(int networksFound)
 		item["rssi"] = WiFi.RSSI(indices[i]);
 		item["channel"] = WiFi.channel(indices[i]);
 		item["enctype"] = WiFi.encryptionType(indices[i]);
-		item["hidden"] = WiFi.isHidden(indices[i]) ? true : false;
 	}
 	size_t len = measureJson(root);
 	AsyncWebSocketMessageBuffer *buffer = ws.makeBuffer(len); //  creates a buffer (len + 1) for you.
