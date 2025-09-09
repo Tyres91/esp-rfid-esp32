@@ -1,374 +1,261 @@
-/*
-MIT License
-
-Copyright (c) 2018 esp-rfid Community
-Copyright (c) 2017 Ömer Şiar Baysal
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
- */
-#define VERSION "2.0.0"
-
-#if defined(ESP32)
-  #include <WiFi.h>
-  #include <AsyncTCP.h>
-#else
-  #include <ESP8266WiFi.h>
-  #include <ESPAsyncTCP.h>
-#endif
-#include "Arduino.h"
-#include <SPI.h>
+#include <Arduino.h>
+#include <WiFi.h>
 #include <ESPmDNS.h>
-#include <ArduinoJson.h>
-#include "SPIFFS.h"
-using fs::File;  // ESP32 deklariert File in fs::
+#include <SPIFFS.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
+#include <AsyncMqttClient.h>
+#include <ArduinoJson.h>    // <-- NEU: damit DynamicJsonDocument/serializeJson bekannt sind
+#include <Wiegand.h>        // esp-rfid-kompatibler Fork (class WIEGAND)
+#include <Bounce2.h>
 #include <TimeLib.h>
 #include <Ticker.h>
-#include <time.h>
-#include <AsyncMqttClient.h>
-#include <Bounce2.h>
-#include "magicnumbers.h"
-#include "config.h"
+#include <SPI.h>
 #include <Update.h>
 
-Config config;
+#include "config.h"
 
-#include <MFRC522.h>
-#include "PN532.h"
-#include <Wiegand.h>
-#include "rfid125kHz.h"
-#include <SoftwareSerial.h>
+// Forward declarations
+void setupWifi(bool apMode);
+void setupWeb();
+void wsBroadcastStatus();
+void setupMQTT();
+void loopRFID();
+void logMaintenance(const String& cmd, const String& arg);
+void writeEvent(const String& t1, const String& t2, const String& t3, const String& t4);
+void writeLatest(const String& uid, const String& user, int granted, int rssi);
 
-MFRC522 mfrc522 = MFRC522();
-PN532 pn532;
-WIEGAND wg;
-RFID_Reader RFIDr;
-SoftwareSerial *rdm6300SwSerial = NULL;
-
-// relay specific variables
-bool activateRelay[MAX_NUM_RELAYS] = {false, false, false, false};
-bool deactivateRelay[MAX_NUM_RELAYS] = {false, false, false, false};
-
-// these are from vendors
-#include "webh/glyphicons-halflings-regular.woff.gz.h"
-#include "webh/required.css.gz.h"
-#include "webh/required.js.gz.h"
-
-// these are from us which can be updated and changed
-#include "webh/esprfid.js.gz.h"
-#include "webh/esprfid.htm.gz.h"
-#include "webh/index.html.gz.h"
-
-AsyncMqttClient mqttClient;
-Ticker mqttReconnectTimer;
-Ticker wifiReconnectTimer;
-Ticker wsMessageTicker;
-Bounce openLockButton;
+AppConfig config;
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+Ticker statusTicker;
 
-#define LEDoff HIGH
-#define LEDon LOW
+// --- Wiegand (esp-rfid API: class WIEGAND, available/getCode/getWiegandType)
+WIEGAND wiegand;
 
-#define BEEPERoff HIGH
-#define BEEPERon LOW
-
-// Variables for whole scope
-unsigned long cooldown = 0;
-unsigned long currentMillis = 0;
-unsigned long deltaTime = 0;
-bool doEnableWifi = false;
-bool formatreq = false;
-const char *httpUsername = "admin";
-unsigned long keyTimer = 0;
-uint8_t lastDoorbellState = 0;
-uint8_t lastDoorState = 0;
-uint8_t lastTamperState = 0;
-unsigned long nextbeat = 0;
-time_t epoch;
-time_t lastNTPepoch;
-unsigned long lastNTPSync = 0;
-unsigned long openDoorMillis = 0;
-unsigned long previousLoopMillis = 0;
-unsigned long previousMillis = 0;
-bool shouldReboot = false;
-tm timeinfo;
-unsigned long uptimeSeconds = 0;
-unsigned long wifiPinBlink = millis();
-unsigned long wiFiUptimeMillis = 0;
-
-#include "led.esp"
-#include "beeper.esp"
-#include "log.esp"
-#include "mqtt.esp"
-#include "helpers.esp"
-#include "wsResponses.esp"
-#include "rfid.esp"
-#include "wifi.esp"
-#include "config.esp"
-#include "websocket.esp"
-#include "webserver.esp"
-#include "door.esp"
-#include "doorbell.esp"
-
-void fsMount() {
-  if (!FS.begin(true)) { Serial.println("FS mount failed"); }
-}
-
-static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-  switch (event) {
-    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-      Serial.println("[WiFi] STA connected");
-      break;
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      Serial.print("[WiFi] Got IP: ");
-      Serial.println(WiFi.localIP());
-      break;
-    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-      Serial.printf("[WiFi] Disconnected (reason=%d). Reconnecting...\n", info.wifi_sta_disconnected.reason);
-      WiFi.reconnect();
-      break;
-    case ARDUINO_EVENT_WIFI_AP_START:
-      Serial.println("[WiFi] AP started");
-      break;
-    default: break;
+// --- LED helper
+static void ledBlink(int times = 1, int onMs = 50, int offMs = 50) {
+  for (int i = 0; i < times; ++i) {
+    digitalWrite(PIN_LED, HIGH);
+    delay(onMs);
+    digitalWrite(PIN_LED, LOW);
+    delay(offMs);
   }
 }
 
-// Chip-ID Ersatz (ESP8266 -> ESP32)
+// ESP32 WiFi event handler
+#if defined(ESP32)
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_AP_START:
+      Serial.println(F("[WiFi] AP started"));
+      break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.println(F("[WiFi] STA connected"));
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.printf("[WiFi] Got IP: %s\n", WiFi.localIP().toString().c_str());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.printf("[WiFi] STA disconnected (reason=%d) -> reconnect\n", info.wifi_sta_disconnected.reason);
+      WiFi.reconnect();
+      break;
+    default:
+      break;
+  }
+}
+#endif
+
+// Helpers
 static uint32_t chipId32() {
   uint64_t mac = ESP.getEfuseMac();
   return (uint32_t)(mac >> 24);
 }
 
-static String ipToString(const IPAddress &ip) { return ip.toString(); }
+void wsBroadcastStatus() {
+  DynamicJsonDocument root(512);
+  root["command"]  = "status";
+  root["heap"]     = ESP.getFreeHeap();
+  root["ip"]       = WiFi.localIP().toString();
+  root["hostname"] = (WiFi.getHostname() ? WiFi.getHostname() : "");
+  root["chipid"]   = String(chipId32(), HEX);
 
-
-void ICACHE_FLASH_ATTR setup()
-{
-#ifdef DEBUG
-	Serial.begin(115200);
-	Serial.println();
-
-	Serial.print(F("[ INFO ] ESP RFID v"));
-	Serial.println(VERSION);
-
-	uint32_t realSize = ESP.getFlashChipRealSize();
-	uint32_t ideSize = ESP.getFlashChipSize();
-	FlashMode_t ideMode = ESP.getFlashChipMode();
-	Serial.printf("Flash real id:   %08X\n", ESP.getFlashChipId());
-	Serial.printf("Flash real size: %u\n\n", realSize);
-	Serial.printf("Flash ide  size: %u\n", ideSize);
-	Serial.printf("Flash ide speed: %u\n", ESP.getFlashChipSpeed());
-	Serial.printf("Flash ide mode:  %s\n", (ideMode == FM_QIO ? "QIO" : ideMode == FM_QOUT ? "QOUT"
-																	: ideMode == FM_DIO	   ? "DIO"
-																	: ideMode == FM_DOUT   ? "DOUT"
-																						   : "UNKNOWN"));
-	if (ideSize != realSize)
-	{
-		Serial.println("Flash Chip configuration wrong!\n");
-	}
-	else
-	{
-		Serial.println("Flash Chip configuration ok.\n");
-	}
-#endif
-
-WiFi.onEvent(onWiFiEvent);
-
-	if (!SPIFFS.begin())
-	{
-		if (SPIFFS.format())
-		{
-			writeEvent("WARN", "sys", "Filesystem formatted", "");
-		}
-		else
-		{
-#ifdef DEBUG
-			Serial.println(F(" failed!"));
-			Serial.println(F("[ WARN ] Could not format filesystem!"));
-#endif
-		}
-	}
-
-	bool configured = false;
-	configured = loadConfiguration(config);
-	setupMqtt();
-	setupWebServer();
-	setupWifi(configured);
-	writeEvent("INFO", "sys", "System setup completed, running", "");
+  String out;
+  serializeJson(root, out);
+  ws.textAll(out);
 }
 
-void ICACHE_RAM_ATTR loop()
-{
-	currentMillis = millis();
-	deltaTime = currentMillis - previousLoopMillis;
-	uptimeSeconds = currentMillis / 1000;
-	previousLoopMillis = currentMillis;
-	
-	trySyncNTPtime(10);
+// WebSocket
+static void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type,
+                      void * arg, uint8_t * data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.printf("[WS] Client %u connected\n", client->id());
+    wsBroadcastStatus();
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.printf("[WS] Client %u disconnected\n", client->id());
+  } else if (type == WS_EVT_DATA) {
+    String s((char*)data, len);
+    s.trim();
+    if (s == "status") wsBroadcastStatus();
+    else if (s.startsWith("log:")) {
+      logMaintenance("cmd", s);
+    }
+  }
+}
 
-	openLockButton.update();
-	if (config.openlockpin != 255 && openLockButton.fell())
-	{
-		writeLatest(" ", "Button", 1);
-		mqttPublishAccess(epoch, "true", "Always", "Button", " ", " ");
-		activateRelay[0] = true;
-		beeperValidAccess();
-		// TODO: handle other relays
-	}
+// Webserver/OTA
+void setupWeb() {
+  server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
 
-	ledWifiStatus();
-	ledAccessDeniedOff();
-	beeperBeep();
-	doorStatus();
-	doorbellStatus();
+  server.on("/update", HTTP_POST,
+    [](AsyncWebServerRequest *request){
+      bool ok = !Update.hasError();
+      auto *res = request->beginResponse(200, "text/plain", ok ? "OK" : "FAIL");
+      res->addHeader("Connection", "close");
+      request->send(res);
+      ESP.restart();
+    },
+    [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+      if (!index) {
+        Serial.printf("[OTA] Update start: %s\n", filename.c_str());
+        // Update.runAsync(true);         // <-- ENTFERNT: gibt's im ESP32 Core 3.x nicht mehr
+        Update.begin(UPDATE_SIZE_UNKNOWN);
+      }
+      if (Update.write(data, len) != len) {
+        // Fehlerbehandlung optional
+      }
+      if (final) {
+        if (!Update.end(true)) {
+          // Fehlerbehandlung optional
+        }
+      }
+    }
+  );
 
-	if (currentMillis >= cooldown)
-	{
-		rfidLoop();
-	}
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
+  server.begin();
+}
 
-	for (int currentRelay = 0; currentRelay < config.numRelays; currentRelay++)
-	{
-		if (config.lockType[currentRelay] == LOCKTYPE_CONTINUOUS) // Continuous relay mode
-		{
-			if (activateRelay[currentRelay])
-			{
-				if (digitalRead(config.relayPin[currentRelay]) == !config.relayType[currentRelay]) // currently OFF, need to switch ON
-				{
-					mqttPublishIo("lock" + String(currentRelay), "UNLOCKED");
-#ifdef DEBUG
-					Serial.print("mili : ");
-					Serial.println(millis());
-					Serial.printf("activating relay %d now\n", currentRelay);
-#endif
-					digitalWrite(config.relayPin[currentRelay], config.relayType[currentRelay]);
-				}
-				else // currently ON, need to switch OFF
-				{
-					mqttPublishIo("lock" + String(currentRelay), "LOCKED");
-#ifdef DEBUG
-					Serial.print("mili : ");
-					Serial.println(millis());
-					Serial.printf("deactivating relay %d now\n", currentRelay);
-#endif
-					digitalWrite(config.relayPin[currentRelay], !config.relayType[currentRelay]);
-				}
-				activateRelay[currentRelay] = false;
-			}
-		}
-		else if (config.lockType[currentRelay] == LOCKTYPE_MOMENTARY) // Momentary relay mode
-		{
-			if (activateRelay[currentRelay])
-			{
-				mqttPublishIo("lock" + String(currentRelay), "UNLOCKED");
-#ifdef DEBUG
-				Serial.print("mili : ");
-				Serial.println(millis());
-				Serial.printf("activating relay %d now\n", currentRelay);
-#endif
-				digitalWrite(config.relayPin[currentRelay], config.relayType[currentRelay]);
-				previousMillis = millis();
-				activateRelay[currentRelay] = false;
-				deactivateRelay[currentRelay] = true;
-			}
-			else if ((currentMillis - previousMillis >= config.activateTime[currentRelay]) && (deactivateRelay[currentRelay]))
-			{
-				mqttPublishIo("lock" + String(currentRelay), "LOCKED");
-#ifdef DEBUG
-				Serial.println(currentMillis);
-				Serial.println(previousMillis);
-				Serial.println(config.activateTime[currentRelay]);
-				Serial.println(activateRelay[currentRelay]);
-				Serial.println("deactivate relay after this");
-				Serial.print("mili : ");
-				Serial.println(millis());
-#endif
-				digitalWrite(config.relayPin[currentRelay], !config.relayType[currentRelay]);
-				deactivateRelay[currentRelay] = false;
-			}
-		}
-	}
-	if (formatreq)
-	{
-#ifdef DEBUG
-		Serial.println(F("[ WARN ] Factory reset initiated..."));
-#endif
-		SPIFFS.end();
-		ws.enable(false);
-		SPIFFS.format();
-		ESP.restart();
-	}
+// WiFi
+void setupWifi(bool apMode) {
+  WiFi.mode(WIFI_AP_STA);
+  #if defined(ESP32)
+    WiFi.onEvent(onWiFiEvent);
+  #endif
 
-	if (config.autoRestartIntervalSeconds > 0 && uptimeSeconds > config.autoRestartIntervalSeconds)
-	{
-		writeEvent("WARN", "sys", "Auto restarting...", "");
-		shouldReboot = true;
-	}
+  if (apMode || config.wifi_ssid.isEmpty()) {
+    config.accessPointMode = true;
+  }
 
-	if (shouldReboot)
-	{
-		writeEvent("INFO", "sys", "System is going to reboot", "");
-		SPIFFS.end();
-		ESP.restart();
-	}
+  if (config.accessPointMode) {
+    WiFi.softAP(config.ap_ssid.c_str(), config.ap_pass.c_str(), 1, false, 4);
+    Serial.printf("[WiFi] AP SSID: %s  IP: %s\n",
+                  config.ap_ssid.c_str(), WiFi.softAPIP().toString().c_str());
+  }
 
-	if (WiFi.isConnected())
-	{
-		wiFiUptimeMillis += deltaTime;
-	}
+  if (!config.wifi_ssid.isEmpty()) {
+    WiFi.begin(config.wifi_ssid.c_str(), config.wifi_pass.c_str());
+  }
 
-	if (config.wifiTimeout > 0 && wiFiUptimeMillis > (config.wifiTimeout * 1000) && WiFi.isConnected())
-	{
-		writeEvent("INFO", "wifi", "WiFi is going to be disabled", "");
-		disableWifi();
-	}
+  if (!MDNS.begin(config.hostname.c_str())) {
+    Serial.println(F("[mDNS] start failed"));
+  } else {
+    Serial.printf("[mDNS] http://%s.local\n", config.hostname.c_str());
+  }
+}
 
-	// don't try connecting to WiFi when waiting for pincode
-	if (doEnableWifi == true && keyTimer == 0 && activateRelay[0] == true)
-	{
-		if (!WiFi.isConnected())
-		{
-			enableWifi();
-			writeEvent("INFO", "wifi", "Enabling WiFi", "");
-			doEnableWifi = false;
-		}
-	}
+// Logging (SPIFFS)
+void writeEvent(const String& t1, const String& t2, const String& t3, const String& t4) {
+  DynamicJsonDocument doc(256);
+  doc["ts"] = (uint32_t)now();
+  doc["a"] = t1; doc["b"] = t2; doc["c"] = t3; doc["d"] = t4;
+  String line; serializeJson(doc, line); line += "\n";
+  File f = SPIFFS.open("/eventlog.json", "a");
+  if (f) { f.print(line); f.close(); }
+}
 
-	if (config.mqttEnabled && mqttClient.connected())
-	{
-		if ((unsigned)epoch > nextbeat)
-		{
-			mqttPublishHeartbeat(epoch, uptimeSeconds);
-			nextbeat = (unsigned)epoch + config.mqttInterval;
-#ifdef DEBUG
-			Serial.print("[ INFO ] Nextbeat=");
-			Serial.println(nextbeat);
-#endif
-		}
-		processMqttQueue();
-	}
+void writeLatest(const String& uid, const String& user, int granted, int rssi) {
+  DynamicJsonDocument doc(256);
+  doc["ts"] = (uint32_t)now();
+  doc["uid"] = uid; doc["user"] = user; doc["ok"] = granted; doc["rssi"] = rssi;
+  String line; serializeJson(doc, line); line += "\n";
+  File f = SPIFFS.open("/latestlog.json", "a");
+  if (f) { f.print(line); f.close(); }
+}
 
-	processWsQueue();
+void logMaintenance(const String& cmd, const String& arg) {
+  (void)cmd; (void)arg; // Platzhalter
+}
 
-	// clean unused websockets
-	ws.cleanupClients();
+// MQTT (minimal)
+AsyncMqttClient mqtt;
+Ticker mqttReconnectTimer;
+
+static void mqttConnect() {
+  if (config.mqtt_host.length()) {
+    mqtt.connect();
+  }
+}
+
+void setupMQTT() {
+  if (!config.mqtt_host.length()) return;
+  mqtt.setServer(config.mqtt_host.c_str(), config.mqtt_port);
+  mqtt.onConnect([](bool sess){
+    Serial.println(F("[MQTT] connected"));
+  });
+  mqtt.onDisconnect([](AsyncMqttClientDisconnectReason r){
+    Serial.printf("[MQTT] disconnected (%d)\n", (int)r);
+    mqttReconnectTimer.once(2, mqttConnect);
+  });
+}
+
+// RFID / Wiegand – esp-rfid API
+void loopRFID() {
+  if (wiegand.available()) {
+    uint64_t code = wiegand.getCode();
+    uint8_t  bits = wiegand.getWiegandType();
+
+    Serial.printf("[RFID] code=%llu bits=%u\n", (unsigned long long)code, bits);
+    writeLatest(String((unsigned long long)code), "unknown", 1, -50);
+    writeEvent("rfid", String((unsigned long long)code), "granted", "");
+    ledBlink(2, 30, 30);
+
+    DynamicJsonDocument root(256);
+    root["command"] = "rfid";
+    root["code"]    = String((unsigned long long)code);
+    root["bits"]    = bits;
+    String out; serializeJson(root, out);
+    ws.textAll(out);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
+  pinMode(PIN_RELAY, OUTPUT);
+  digitalWrite(PIN_RELAY, LOW);
+
+  if (!SPIFFS.begin(true)) {
+    Serial.println(F("[SPIFFS] mount failed"));
+  }
+
+  setTime(12,0,0, 1,1,2025);
+
+  wiegand.begin(PIN_WIEGAND_D0, PIN_WIEGAND_D1);
+
+  setupWifi(false);
+  setupWeb();
+  setupMQTT();
+
+  statusTicker.once_ms(500, [](){ wsBroadcastStatus(); });
+}
+
+void loop() {
+  loopRFID();
+  delay(2);
 }

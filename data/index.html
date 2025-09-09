@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ESP-RFID (ESP32)</title>
+  </head>
+  <body>
+    <h1>ESP-RFID (ESP32)</h1>
+    <p>Status: <span id="status">...</span></p>
+    <script>
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.command === "status") {
+            document.getElementById('status').textContent =
+              `heap=${msg.heap} ip=${msg.ip} host=${msg.hostname} chip=${msg.chipid}`;
+          }
+          if (msg.command === "rfid") {
+            console.log("RFID", msg);
+          }
+        } catch (err) { console.log(e.data); }
+      };
+      ws.onopen = () => ws.send("status");
+    </script>
+  </body>
+</html>
