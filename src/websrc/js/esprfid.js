@@ -898,6 +898,7 @@ function restore1by1(i, len, data) {
   datatosend.acctype = data[i].acctype;
   datatosend.validsince = data[i].validsince;
   datatosend.validuntil = data[i].validuntil;
+  datatosend.onetimeuse = data[i].onetimeuse;
   sendWebsocketWithRetry(JSON.stringify(datatosend));
   slot++;
   if (slot === len) {
@@ -1269,6 +1270,12 @@ function initUserTable() {
             "visible": false
           },
           {
+            "name": "onetimeuse",
+            "title": "Onetime Use",
+            "type": "checkbox",
+            "visible": false
+          },
+          {
             "name": "username",
             "title": "User Name or Label"
           },
@@ -1401,6 +1408,7 @@ function initUserTable() {
             $editor.find("#acctype4").val(giveAccType(4));
             $editor.find("#validsince").val(values.validsince);
             $editor.find("#validuntil").val(values.validuntil);
+            $editor.find("#onetimeuse").first().prop("checked", values.onetimeuse == 1 || values.onetimeuse == "1");
             $modal.data("row", row);
             $editorTitle.text("Edit User # " + values.username);
             $modal.modal("show");
@@ -1433,6 +1441,7 @@ function initUserTable() {
           uid: $editor.find("#uid").val(),
           pincode: $editor.find("#pincode").val(),
           username: $editor.find("#username").val(),
+          onetimeuse: $editor.find("#onetimeuse").first().is(":checked") ? 1 : 0,
           acctype: parseInt($editor.find("#acctype").val()),
           acctype2: parseInt($editor.find("#acctype2").val()),
           acctype3: parseInt($editor.find("#acctype3").val()),
@@ -1453,6 +1462,7 @@ function initUserTable() {
       datatosend.uid = $editor.find("#uid").val();
       datatosend.pincode = $editor.find("#pincode").val();
       datatosend.user = $editor.find("#username").val();
+      datatosend.onetimeuse = $editor.find("#onetimeuse").first().is(":checked") ? 1 : 0,
       datatosend.acctype = parseInt($editor.find("#acctype").val());
       datatosend.acctype2 = parseInt($editor.find("#acctype2").val());
       datatosend.acctype3 = parseInt($editor.find("#acctype3").val());

@@ -6,6 +6,7 @@ String type = "";
 String uid = "";
 String v1uid = "";
 String username = "";
+String onetimeuse = "";
 bool wiegandAvailable = false;
 
 #define WIEGAND_ENT 0xD
@@ -279,6 +280,10 @@ void pinCodeRead()
 			Serial.println("Keycode captured. . .");
 #endif
 			currentInput = currentInput + String(wg.getCode());
+
+#ifdef DEBUG
+			Serial.println("Keycode captured. . ." + String(wg.getCode()));
+#endif
 			keyTimer = millis();
 			ledWaitingOn();
 		} else if (keyTimer > 0) // if we are waitingProcessing on input still
@@ -400,6 +405,7 @@ void rfidProcess()
 	 */
 	accountType = json["acctype"];
 	username = json["user"].as<String>();
+	onetimeuse = json["onetimeuse"].as<String>();
 
 #ifdef DEBUG
 	Serial.println(" = known PICC");
@@ -408,6 +414,8 @@ void rfidProcess()
 		Serial.print(uid);
 	else
 		Serial.print(username);
+
+	Serial.print(onetimeuse == "1" ? "' (one-time use)" : "'");
 	Serial.print("'");
 #endif
 
@@ -472,6 +480,34 @@ void rfidProcess()
 				activateRelay[currentRelay] = true;
 			}
 		}
+
+		// ...im Block if (processingState == valid || processingState == validAdmin) in rfidProcess()...
+    // ...existing code...
+
+    // One-Time-Use: Nach erfolgreichem Zugang User deaktivieren
+    if (onetimeuse == "1") {
+        String userFile = "/P/" + uid;
+        File f = SPIFFS.open(userFile, "r");
+        if (f) {
+            size_t size = f.size();
+            std::unique_ptr<char[]> buf(new char[size]);
+            f.readBytes(buf.get(), size);
+            f.close();
+            DynamicJsonDocument json(512);
+            auto error = deserializeJson(json, buf.get(), size);
+            if (!error) {
+                json["acctype"] = 0; // Disable user
+                File wf = SPIFFS.open(userFile, "w");
+                if (wf) {
+                    serializeJson(json, wf);
+                    wf.close();
+#ifdef DEBUG
+                    Serial.println("[ INFO ] One-time-use user wurde deaktiviert.");
+#endif
+                }
+            }
+        }
+    }
 	}
 }
 
@@ -559,6 +595,7 @@ void rfidOutsideMessaging()
 		root["known"] = 1;
 		root["acctype"] = accountType;
 		root["user"] = username;
+		root["onetimeuse"] = onetimeuse;
 		size_t len = measureJson(root);
 		AsyncWebSocketMessageBuffer *buffer = ws.makeBuffer(len);
 		if (buffer)

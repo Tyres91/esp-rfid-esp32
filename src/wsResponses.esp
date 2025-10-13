@@ -25,6 +25,7 @@ void ICACHE_FLASH_ATTR sendUserList(int page, AsyncWebSocketClient *client)
 			if (!error)
 			{
 				String username = json["user"];
+				String onetimeuse = json["onetimeuse"];
 				String pincode = "";
 				if(json.containsKey("pincode"))
 				{
@@ -43,6 +44,7 @@ void ICACHE_FLASH_ATTR sendUserList(int page, AsyncWebSocketClient *client)
 				unsigned long validsince = json.containsKey("validsince") ? json["validsince"] : 0;
 				unsigned long validuntil = json["validuntil"];
 				item["username"] = username;
+				item["onetimeuse"] = onetimeuse;
 				item["validsince"] = validsince;
 				item["validuntil"] = validuntil;
 				item["pincode"] = pincode;
